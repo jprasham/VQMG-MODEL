@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vqmg"
+version = "1.0.0"
+description = "VQMG — Growth / Momentum / Quality / Value quant model as a Python library"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "requests>=2.31",
+]
+
+[project.scripts]
+vqmg = "vqmg.cli:main"
+
+[tool.setuptools]
+packages = ["vqmg"]

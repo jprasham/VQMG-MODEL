@@ -1,0 +1,26 @@
+# Example universe. Quintiles are cross-sectional — 25+ names give a real read.
+NVDA
+MSFT
+AAPL
+GOOGL
+AMZN
+META
+AVGO
+ASML
+TSM
+V
+MA
+COST
+LLY
+UNH
+JPM
+NFLX
+CRM
+NOW
+ADBE
+AMD
+ORCL
+ISRG
+BKNG
+SHOP
+UBER

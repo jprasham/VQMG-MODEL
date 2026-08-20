@@ -1,0 +1,64 @@
+name: vqmg-run
+
+# Runs the model in CI using the FMP_API_KEY repository secret and uploads the
+# CSV as a build artifact. Useful for developers who do not hold the API key
+# locally: run the workflow, download the artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Space or comma separated tickers (blank = tickers.txt)"
+        required: false
+        default: ""
+      neutral:
+        description: "Score within groups: none | sector | industry | country"
+        required: false
+        default: "none"
+      weights:
+        description: "Optional composite, e.g. GRW=0.3,MOM=0.3,QLT=0.3,VAL=0.1 (blank = no composite)"
+        required: false
+        default: ""
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run VQMG
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${FMP_API_KEY}" ]; then
+            echo "::error::FMP_API_KEY secret is not set on this repository."
+            exit 1
+          fi
+          ARGS=""
+          if [ -n "${{ inputs.tickers }}" ]; then
+            ARGS="${{ inputs.tickers }}"
+          else
+            ARGS="--tickers-file tickers.txt"
+          fi
+          if [ "${{ inputs.neutral }}" != "none" ] && [ -n "${{ inputs.neutral }}" ]; then
+            ARGS="$ARGS --neutral ${{ inputs.neutral }}"
+          fi
+          if [ -n "${{ inputs.weights }}" ]; then
+            ARGS="$ARGS --weights ${{ inputs.weights }}"
+          fi
+          vqmg $ARGS -o out/vqmg.csv
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vqmg-output
+          path: out/vqmg.csv
+          retention-days: 30
