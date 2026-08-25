@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vqmg"
-version = "1.0.0"
+# pip requires a version string. It is a fixed placeholder — this package is not
+# released or tagged. Developers always install the current state of main.
+version = "0.0.0"
 description = "VQMG — Growth / Momentum / Quality / Value quant model as a Python library"
 readme = "README.md"
 requires-python = ">=3.10"

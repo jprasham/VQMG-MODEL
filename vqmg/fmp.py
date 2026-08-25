@@ -56,8 +56,7 @@ def resolve_api_key(api_key: str | None = None) -> str:
     key = api_key or os.environ.get("FMP_API_KEY") or os.environ.get("VQMG_FMP_API_KEY")
     if not key:
         raise FMPError(
-            "No FMP API key. Pass api_key=... or set the FMP_API_KEY environment "
-            "variable (in CI this comes from the FMP_API_KEY GitHub Secret)."
+            "No FMP API key. Pass api_key=... or set the FMP_API_KEY environment variable."
         )
     return key
 

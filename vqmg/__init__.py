@@ -38,8 +38,6 @@ from .engine import (
 )
 from .fmp import FMPError
 
-__version__ = "1.0.0"
-
 # ---------------------------------------------------------------------------
 # Output schema — what a developer gets back, grouped by model
 # ---------------------------------------------------------------------------
@@ -195,5 +193,4 @@ __all__ = [
     "run", "metrics", "columns", "COLUMN_GROUPS", "SCORE_COLUMNS",
     "FACTOR_SPEC", "BOUNDS", "SUBS", "SUPERS", "SUPER_LABELS",
     "compute_metrics", "rank_universe", "engine", "fmp", "FMPError",
-    "__version__",
 ]

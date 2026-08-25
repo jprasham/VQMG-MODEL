@@ -19,38 +19,52 @@ source implementation. Only two things differ, both structural:
 
 ## Install
 
-Add the developer as a collaborator on this repo first, then:
+Public repo, so no authentication and no access setup:
 
 ```powershell
 pip install git+https://github.com/jprasham/VQMG-MODEL.git
 ```
 
-Upgrade later with the same command plus `--upgrade --force-reinstall`.
-
-Pin a release in a project's `requirements.txt`:
+Same command works in a `requirements.txt`:
 
 ```
-vqmg @ git+https://github.com/jprasham/VQMG-MODEL.git@v1.0.0
+vqmg @ git+https://github.com/jprasham/VQMG-MODEL.git
 ```
+
+There are no releases or tags. That line always installs the current state of
+`main`. To pick up changes:
+
+```powershell
+pip install --upgrade --force-reinstall git+https://github.com/jprasham/VQMG-MODEL.git
+```
+
+Because there is nothing to pin, a change pushed to `main` reaches every project
+on its next install. Coordinate before editing `vqmg/engine.py`.
 
 ## API key
 
-The library reads `FMP_API_KEY` from the environment.
+Each developer supplies their own FMP key. The library reads `FMP_API_KEY` from
+the environment — nothing else, and it is never stored in this repo.
+
+Locally:
 
 ```powershell
 # current shell only
 $env:FMP_API_KEY = "your_key"
 
-# persist for this Windows user
+# persist for this Windows user (reopen PowerShell afterwards)
 setx FMP_API_KEY "your_key"
 ```
 
-In GitHub Actions the key comes from the `FMP_API_KEY` repository secret — see
-`.github/workflows/vqmg-run.yml`.
+In your own project's GitHub Actions, store the key as a secret in **your**
+repository and hand it to the step:
 
-> A GitHub Secret is only readable by Actions running in this repo. It cannot
-> hand the key to a developer's laptop. Either each developer gets the key in
-> their own environment, or they run the workflow and download the CSV artifact.
+```yaml
+- name: Run
+  env:
+    FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+  run: python your_script.py
+```
 
 ## Use
 
@@ -154,6 +168,8 @@ Per-ticker FMP payloads are cached as JSON for 24 hours in `.vqmg_cache/`
 every developer's numbers mean.
 
 ## Tests
+
+No API key needed — the contract tests never touch the network.
 
 ```powershell
 python -m pip install pytest

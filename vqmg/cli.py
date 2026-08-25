@@ -11,7 +11,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, run
+from . import run
 from .fmp import DEFAULT_CACHE_DIR, FMPError
 
 
@@ -41,7 +41,6 @@ def main(argv=None) -> int:
     p.add_argument("--workers", type=int, default=4, help="parallel tickers (default 4)")
     p.add_argument("--refresh", action="store_true", help="ignore the 24h cache")
     p.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
-    p.add_argument("--version", action="version", version=f"vqmg {__version__}")
     a = p.parse_args(argv)
 
     tickers = list(a.tickers)
