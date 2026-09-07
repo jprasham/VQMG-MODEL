@@ -24,6 +24,7 @@ from __future__ import annotations
 import concurrent.futures as _cf
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from . import engine, fmp
@@ -45,42 +46,21 @@ from .fmp import FMPError
 IDENTITY = ["symbol", "company", "sector", "industry", "country", "price", "mktcap",
             "fin_mode", "cap_bar"]
 
-GROWTH = ["rev_cagr_3y", "rev_yoy_ttm", "rev_accel", "gp_growth_ttm",
-          "fwd_rev_growth", "fwd_eps_growth", "growth_persistence"]
+# The ranked factors, taken straight from engine.FACTOR_SPEC so this list can
+# never drift from what the model actually scores. Grouped by sub factor.
+RANKED = {sub: [mtc for mtc, (f, _) in FACTOR_SPEC.items() if f == sub] for sub in SUBS}
 
-MOMENTUM_BUSINESS = ["rev_yoy_q0", "rev_accel_q", "gm_change_yoy", "eps_surprise",
-                     "target_chg_3m", "target_upside"]
-
-MOMENTUM_MARKET = ["mom_12_1", "trend_smoothness", "dist_from_high", "rel_strength",
-                   "down_resilience", "price_vs_200d", "move_1m", "move_1m_pctile",
-                   "worst_month_5y", "dist_to_52w_low", "vol_1y"]
-
-QUALITY_ECONOMICS = ["gross_margin", "gp_to_assets", "roic", "roic_5y", "roic_tc",
-                     "incremental_roic", "roiic", "intrinsic_compound", "rule_of_40",
-                     "opex_conversion", "reinvest_intensity", "sustainable_growth",
-                     "balance_capacity", "fcf_margin", "above_trend_capex",
-                     "cash_to_mktcap"]
-
-QUALITY_EARNINGS = ["accruals", "bs_bloat", "dilution", "sbc_to_rev", "wc_flatter",
-                    "dpo_change_days", "dso_change_days", "dpo_now_days", "dpo_norm_days",
-                    "dso_now_days", "dso_norm_days", "pay_day_value", "rec_day_value"]
-
-VALUE = ["ev", "ev_to_gp", "ev_gp_growth_adj", "fwd_pe", "normalized_pe",
-         "ocf_yield", "fcf_yield", "ocf_yield_reported", "fcf_yield_reported",
-         "wc_strip_applied", "cash_engine_yield", "midcycle_yield", "terminal_yield",
-         "rerating_gap", "expected_return", "peak_margin_risk", "normalized_fcf_yield",
-         "div_yield", "buyback_yield", "distributed_yield",
-         "max_downside", "worst_strong_downside", "downside_rating",
-         "bond_growth", "earnings_suspect"]
+# Sub factor -> the super factor model it rolls into.
+SUB_TO_SUPER = {sub: sup for sup, blend in SUPERS.items() for sub in blend}
 
 COLUMN_GROUPS = {
     "identity": IDENTITY,
-    "growth": GROWTH,
-    "momentum_business": MOMENTUM_BUSINESS,
-    "momentum_market": MOMENTUM_MARKET,
-    "quality_economics": QUALITY_ECONOMICS,
-    "quality_earnings": QUALITY_EARNINGS,
-    "value": VALUE,
+    "growth": RANKED["G"],                  # -> GRW
+    "momentum_business": RANKED["B"],       # -> MOM
+    "momentum_market": RANKED["M"],         # -> MOM
+    "quality_economics": RANKED["R"],       # -> QLT
+    "quality_earnings": RANKED["Q"],        # -> QLT
+    "value": RANKED["V"],                   # -> VAL
 }
 
 SCORE_COLUMNS = (
@@ -93,7 +73,7 @@ SCORE_COLUMNS = (
 
 
 def columns(include_scores: bool = True) -> list[str]:
-    """The full ordered output schema of `run()`."""
+    """The ordered output schema of `run()`: identity, the 41 ranked factors, scores."""
     cols: list[str] = []
     for group in COLUMN_GROUPS.values():
         cols += group
@@ -102,10 +82,12 @@ def columns(include_scores: bool = True) -> list[str]:
     return cols
 
 
-def _order(df: pd.DataFrame) -> pd.DataFrame:
+def _order(df: pd.DataFrame, full: bool = False) -> pd.DataFrame:
     wanted = [c for c in columns() if c in df.columns]
-    rest = [c for c in df.columns if c not in wanted]   # never silently drop anything
-    return df[wanted + rest]
+    if full:
+        rest = [c for c in df.columns if c not in wanted]
+        return df[wanted + rest]
+    return df[wanted]
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +113,7 @@ def metrics(ticker: str, api_key: str | None = None, *, refresh: bool = False,
 def run(tickers, api_key: str | None = None, *, neutral: str | None = None,
         weights: dict | None = None, refresh: bool = False, workers: int = 4,
         cache_dir: str | Path = fmp.DEFAULT_CACHE_DIR,
-        raise_on_error: bool = False) -> pd.DataFrame:
+        raise_on_error: bool = False, full: bool = False) -> pd.DataFrame:
     """Score a list of tickers. One row per ticker, columns as `vqmg.columns()`.
 
     tickers   list of symbols, or a comma/whitespace separated string.
@@ -141,6 +123,9 @@ def run(tickers, api_key: str | None = None, *, neutral: str | None = None,
     weights   optional {'GRW':..,'MOM':..,'QLT':..,'VAL':..}. Supplying it adds
               `composite` and `core_rank`. Omit it and neither column appears.
     workers   parallel tickers. Each ticker is ~12 FMP calls.
+    full      True also returns the diagnostic variables the model computes but
+              does not rank (roic_tc, cash_engine_yield, downside_rating,
+              normalized_pe, DSO/DPO days, vol_1y and the rest).
 
     Tickers that could not be fetched are listed in `df.attrs["errors"]` rather
     than emitted as empty rows. Set raise_on_error=True to fail loudly instead.
@@ -181,7 +166,7 @@ def run(tickers, api_key: str | None = None, *, neutral: str | None = None,
 
     df = pd.DataFrame(good)
     df = engine.rank_universe(df, neutral=neutral, weights=weights)
-    df = _order(df)
+    df = _order(df, full=full)
     df.attrs["errors"] = errors
     df.attrs["requested"] = tickers
     df.attrs["neutral"] = neutral
@@ -191,6 +176,7 @@ def run(tickers, api_key: str | None = None, *, neutral: str | None = None,
 
 __all__ = [
     "run", "metrics", "columns", "COLUMN_GROUPS", "SCORE_COLUMNS",
+    "RANKED", "SUB_TO_SUPER", "IDENTITY",
     "FACTOR_SPEC", "BOUNDS", "SUBS", "SUPERS", "SUPER_LABELS",
     "compute_metrics", "rank_universe", "engine", "fmp", "FMPError",
 ]

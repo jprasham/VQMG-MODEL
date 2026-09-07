@@ -39,6 +39,7 @@ def main(argv=None) -> int:
                    help="compute z-scores within groups instead of universe-wide")
     p.add_argument("--weights", help="opt-in composite, e.g. GRW=0.25,MOM=0.4,QLT=0.25,VAL=0.1")
     p.add_argument("--workers", type=int, default=4, help="parallel tickers (default 4)")
+    p.add_argument("--full", action="store_true", help="also emit the unranked diagnostics")
     p.add_argument("--refresh", action="store_true", help="ignore the 24h cache")
     p.add_argument("--cache-dir", default=str(DEFAULT_CACHE_DIR))
     a = p.parse_args(argv)
@@ -53,7 +54,8 @@ def main(argv=None) -> int:
 
     try:
         df = run(tickers, neutral=a.neutral, weights=_parse_weights(a.weights),
-                 refresh=a.refresh, workers=a.workers, cache_dir=a.cache_dir)
+                 refresh=a.refresh, workers=a.workers, cache_dir=a.cache_dir,
+                 full=a.full)
     except FMPError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

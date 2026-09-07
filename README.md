@@ -102,23 +102,53 @@ vqmg --tickers-file tickers.txt --neutral sector -o vqmg.csv
 
 ## Output
 
-`vqmg.columns()` returns the full ordered schema. Grouped:
+`run()` returns 70 columns: 9 identity, the 40 ranked factors, and 21 scores and
+quintiles. Nothing that is not scored by the model.
 
-| group | contents |
-|---|---|
-| `identity` | symbol, company, sector, industry, country, price, mktcap, financials-mode flags |
-| `growth` | 3Y revenue CAGR, TTM YoY, acceleration vs trend, gross-profit growth, forward revenue/EPS growth, growth persistence |
-| `momentum_business` | latest-quarter YoY, sequential acceleration, gross-margin change, EPS surprise, 3-month target change |
-| `momentum_market` | 12-1 momentum, trend smoothness, distance from 52-week high, relative strength vs SPY, down-market resilience, volatility, drawdown references |
-| `quality_economics` | gross margin, ROIC (current / 5-year / through-cycle), incremental ROIC, ROIIC, GP/assets, Rule of 40, opex conversion, reinvestment intensity, sustainable growth, balance-sheet capacity |
-| `quality_earnings` | accruals, balance-sheet bloat, dilution, SBC/revenue, working-capital flattery, DSO/DPO vs own norm |
-| `value` | EV/GP, cash-engine yield, mid-cycle yield, terminal yield, re-rating gap, expected return, peak-margin risk, distributed yield, max downside, downside rating |
-| scores | `score_G/B/M/R/Q/V`, `q_*` for each, `score_GRW/MOM/QLT/VAL`, `q_GRW/q_MOM/q_QLT/q_VAL`, `coverage` |
+| group | count | contents |
+|---|---|---|
+| `identity` | 9 | symbol, company, sector, industry, country, price, mktcap, fin_mode, cap_bar |
+| `growth` -> GRW | 7 | 3Y revenue CAGR, TTM YoY, acceleration vs trend, gross-profit growth, forward revenue/EPS growth, growth persistence |
+| `momentum_business` -> MOM | 5 | latest-quarter YoY, sequential acceleration, gross-margin change, EPS surprise, 3-month target change |
+| `momentum_market` -> MOM | 5 | 12-1 momentum, trend smoothness, distance from 52-week high, relative strength vs SPY, down-market resilience |
+| `quality_economics` -> QLT | 10 | GP/assets, gross margin, ROIC, incremental ROIC, ROIIC, Rule of 40, opex conversion, reinvestment intensity, sustainable growth, balance-sheet capacity |
+| `quality_earnings` -> QLT | 5 | accruals, balance-sheet bloat, dilution, SBC/revenue, working-capital flattery |
+| `value` -> VAL | 8 | EV/GP, expected return, re-rating gap, OCF yield, FCF yield, peak-margin risk, max downside, growth-adjusted EV/GP |
+| scores | 21 | `score_G/B/M/R/Q/V`, `q_*` for each, `score_GRW/MOM/QLT/VAL`, `q_GRW/q_MOM/q_QLT/q_VAL`, `coverage` |
+
+The factor list is derived from `engine.FACTOR_SPEC` at import time, so the
+schema cannot drift from what the model actually ranks. `vqmg.RANKED` gives the
+factors per sub-factor; `vqmg.SUB_TO_SUPER` maps sub-factors to super-factors.
+
+### Diagnostics
+
+The model computes more than it ranks: `roic_tc`, `roic_5y`, `cash_engine_yield`,
+`midcycle_yield`, `terminal_yield`, `downside_rating`, `normalized_pe`,
+`div_yield`, `distributed_yield`, `fcf_margin`, `vol_1y`, `price_vs_200d`, the
+DSO/DPO day counts and others. These are absolute measures, useful when looking
+at one name rather than sorting a list. They are not in the default output:
+
+```python
+df = vqmg.run(tickers, full=True)   # ranked factors plus every diagnostic
+m  = vqmg.metrics("NVDA")           # one company, all variables, no ranking
+```
+
+### Financials mode
+
+`fin_mode` is 1 when the FMP sector is `Financial Services`. Those names are
+scored on an ROE frame with a 12% return bar instead of 15%, and the metrics that
+have no meaning for a balance-sheet business — gross margin, GP/assets, FCF and
+OCF yields, EV/GP, accruals, incremental ROIC, Rule of 40, opex conversion,
+reinvestment intensity, balance-sheet capacity — are set to `NaN`. Shrinkage in
+the sub-factor blend absorbs the gaps.
+
+This is sector-wide. It catches payment networks, exchanges, asset managers and
+credit-services names alongside banks and insurers.
 
 ### Absolute vs relative — the one thing to know
 
-**Absolute** — every raw variable, `expected_return`, `max_downside`,
-`downside_rating`, `bond_growth`. Meaningful for a single stock on its own.
+**Absolute** — every factor column, plus `expected_return` and `max_downside`.
+Meaningful for a single stock on its own.
 
 **Relative** — every `score_*` and `q_*` column. These describe a name's standing
 *inside the list you passed*. Four tickers produce four quintiles that mean

@@ -80,8 +80,7 @@ def compute_metrics(ticker, blob, bench=None):
     m["company"] = safe(lambda: prof["companyName"], ticker)
     m["sector"] = safe(lambda: prof["sector"], "Unclassified") or "Unclassified"
     m["industry"] = safe(lambda: prof.get("industry", ""), "") or ""
-    _ind = (m["industry"] or "").lower()
-    is_fin = any(k in _ind for k in ("bank", "insurance", "mortgage", "lending"))
+    is_fin = (m["sector"] or "").strip().lower() == "financial services"
     m["fin_mode"] = 1 if is_fin else 0
     m["cap_bar"] = 0.12 if is_fin else 0.15   # ROE bar for balance-sheet financials
     m["country"] = safe(lambda: prof["country"], "Unknown") or "Unknown"
@@ -690,8 +689,7 @@ def compute_metrics(ticker, blob, bench=None):
         # veto still wins: a strong model at -50% is collapse evidence.
         suspect = ((math.isfinite(m.get("peak_margin_risk", np.nan)) and m["peak_margin_risk"] > 0.05)
                    or (math.isfinite(m.get("wc_flatter", np.nan)) and m["wc_flatter"] > 0.015)
-                   or (math.isfinite(m.get("accruals", np.nan)) and m["accruals"] > 0.05)
-                   or (math.isfinite(m.get("guid_net_dir", np.nan)) and m["guid_net_dir"] < -0.3))
+                   or (math.isfinite(m.get("accruals", np.nan)) and m["accruals"] > 0.05))
         m["earnings_suspect"] = 1 if suspect else 0
         if m.get("bond_growth") == 1 and not suspect and not veto:
             r = min(r, 2)          # true bond with growth: capped at D2
@@ -724,7 +722,8 @@ FACTOR_SPEC = {
     "gm_change_yoy":       ("B", +1),
     "eps_surprise":        ("B", +1),
     "target_chg_3m":       ("B", +1),
-    "guid_net_dir":        ("B", +1),
+    # Guidance Net Direction is deliberately NOT part of this model. Business
+    # Momentum is five factors, not six.
     "gp_to_assets":        ("R", +1),
     "gross_margin":        ("R", +1),
     "roic":                ("R", +1),
@@ -763,7 +762,6 @@ BOUNDS = {
     "gp_growth_ttm": (-0.9, 3.0), "fwd_rev_growth": (-0.9, 2.0), "fwd_eps_growth": (-0.9, 3.0),
     "rev_yoy_q0": (-0.9, 3.0), "rev_accel_q": (-1.0, 1.0), "gm_change_yoy": (-0.3, 0.3),
     "eps_surprise": (-2.0, 2.0), "target_chg_3m": (-0.8, 0.8),
-    "guid_net_dir": (-1.0, 1.0), "guid_cred": (0.0, 1.0), "guid_beat_rate": (0.0, 1.0),
     "gp_to_assets": (0.0, 2.0), "gross_margin": (0.0, 1.0), "roic": (-1.0, 1.5),
     "roic_tc": (-1.0, 1.5), "incremental_roic": (-1.0, 1.0), "roiic": (-1.0, 1.0), "intrinsic_compound": (-0.3, 0.8), "rule_of_40": (-1.0, 1.5),
     "opex_conversion": (-3.0, 5.0), "reinvest_intensity": (0.0, 1.0),

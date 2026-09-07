@@ -110,9 +110,12 @@ def _blob(sym: str, seed: int) -> dict:
 
 @pytest.fixture(scope="module")
 def frame():
+    """Mirrors run() with no guidance file supplied."""
     rows = [engine.compute_metrics(f"T{i:02d}", _blob(f"T{i:02d}", i), bench=None)
             for i in range(30)]
-    return engine.rank_universe(pd.DataFrame(rows))
+    df = pd.DataFrame(rows)
+    df["guid_net_dir"] = np.nan          # as run() does when guidance_file is None
+    return engine.rank_universe(df)
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +140,52 @@ def test_headline_metrics_are_populated(frame):
     """One representative live variable from each of the four models."""
     for col in ("rev_cagr_3y", "rev_yoy_q0", "roic", "fcf_yield"):
         assert frame[col].notna().sum() >= len(frame) * 0.8, f"{col} mostly empty"
+
+
+def test_schema_is_exactly_identity_ranked_scores():
+    """run() returns identity + all 41 ranked factors + scores, and nothing else."""
+    ranked = [c for g, cols in vqmg.COLUMN_GROUPS.items() if g != "identity" for c in cols]
+    assert vqmg.columns() == vqmg.IDENTITY + ranked + vqmg.SCORE_COLUMNS
+    assert len(vqmg.columns()) == 9 + 40 + 21 == 70
+
+
+def test_business_momentum_is_five_factors_no_guidance():
+    """Guidance Net Direction is not part of this model."""
+    assert vqmg.COLUMN_GROUPS["momentum_business"] == [
+        "rev_yoy_q0", "rev_accel_q", "gm_change_yoy", "eps_surprise", "target_chg_3m"]
+    assert not any("guid" in c for c in vqmg.columns())
+
+
+def test_every_ranked_factor_in_spec_is_in_the_schema():
+    """The schema is derived from FACTOR_SPEC, so it cannot drift from it."""
+    spec = set(engine.FACTOR_SPEC)
+    assert spec == set(vqmg.columns()) - set(vqmg.IDENTITY) - set(vqmg.SCORE_COLUMNS)
+
+
+def test_unranked_diagnostics_are_dropped_by_default_and_kept_with_full():
+    rows = [engine.compute_metrics(f"T{i:02d}", _blob(f"T{i:02d}", i), bench=None)
+            for i in range(30)]
+    df = engine.rank_universe(pd.DataFrame(rows))
+    lean = vqmg._order(df)
+    wide = vqmg._order(df, full=True)
+    for col in ("roic_tc", "cash_engine_yield", "downside_rating", "normalized_pe", "vol_1y"):
+        assert col not in lean.columns
+        assert col in wide.columns
+
+
+def test_fin_mode_keys_on_sector():
+    fin = _blob("BANK", 1)
+    fin["profile"][0]["sector"] = "Financial Services"
+    fin["profile"][0]["industry"] = "Financial - Credit Services"   # not a bank
+    m = engine.compute_metrics("BANK", fin, bench=None)
+    assert m["fin_mode"] == 1 and m["cap_bar"] == 0.12
+    assert math.isnan(m["gross_margin"]), "financials mode must blank gross margin"
+
+    tech = _blob("TECH", 2)
+    tech["profile"][0]["sector"] = "Technology"
+    tech["profile"][0]["industry"] = "Investment Banking Software"  # 'bank' in the text
+    m2 = engine.compute_metrics("TECH", tech, bench=None)
+    assert m2["fin_mode"] == 0 and m2["cap_bar"] == 0.15
 
 
 def test_no_default_weights_anywhere():
@@ -166,6 +215,12 @@ def test_unknown_weight_key_is_rejected():
         engine.rank_universe(pd.DataFrame(rows), weights={"GROWTH": 1.0})
 
 
+def test_ranked_counts_per_sub_factor(frame):
+    """G 7 | B 5 | M 5 | R 10 | Q 5 | V 8 = 40."""
+    assert {k: len(v) for k, v in vqmg.RANKED.items()} == {
+        "G": 7, "B": 5, "M": 5, "R": 10, "Q": 5, "V": 8}
+
+
 def test_bounds_are_respected(frame):
     for col, (lo, hi) in engine.BOUNDS.items():
         if col in frame.columns:
@@ -181,7 +236,9 @@ def test_coverage_counts_the_four_super_factors(frame):
 def test_no_name_string_leaks():
     import pathlib
     for f in pathlib.Path(vqmg.__file__).parent.glob("*.py"):
-        assert "flux" not in f.read_text().lower(), f"stale name in {f.name}"
+        text = f.read_text().lower()
+        assert "flux" not in text, f"stale name in {f.name}"
+        assert "guid_" not in text, f"stale guidance wiring in {f.name}"
 
 
 def test_metrics_accepts_a_prefetched_blob():
