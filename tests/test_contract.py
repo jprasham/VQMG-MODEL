@@ -94,9 +94,14 @@ def _blob(sym: str, seed: int) -> dict:
                    "marketCap": prices[0]["close"] * 1e9}],
         "income_a": inc_a, "income_q": inc_q, "balance_a": bal_a,
         "cashflow_a": cf_a, "cashflow_q": cf_q,
-        "estimates": [{"date": fy_end, "revenueAvg": base_rev * 1.12,
-                       "estimatedRevenueAvg": base_rev * 1.12,
-                       "epsAvg": 7.4, "estimatedEpsAvg": 7.4}],
+        "estimates": [
+            {"date": fy_end, "revenueAvg": base_rev * 1.12,
+             "estimatedRevenueAvg": base_rev * 1.12,
+             "epsAvg": 7.4, "estimatedEpsAvg": 7.4},
+            {"date": (dt.date.fromisoformat(fy_end) + dt.timedelta(days=365)).isoformat(),
+             "revenueAvg": base_rev * 1.25, "estimatedRevenueAvg": base_rev * 1.25,
+             "epsAvg": 8.6, "estimatedEpsAvg": 8.6},
+        ],
         "prices": {"historical": prices},
         "surprises": [{"date": "2025-10-30", "actualEarningResult": 1.24,
                        "estimatedEarning": 1.15}],
@@ -138,7 +143,8 @@ def test_all_four_models_produce_scores_and_quintiles(frame):
 
 def test_headline_metrics_are_populated(frame):
     """One representative live variable from each of the four models."""
-    for col in ("rev_cagr_3y", "rev_yoy_q0", "roic", "fcf_yield"):
+    for col in ("rev_cagr_3y", "rev_yoy_q0", "roic", "fcf_yield", "ebit_to_ev",
+                "book_to_price", "sales_to_ev", "normalized_ep", "fwd_earn_yield"):
         assert frame[col].notna().sum() >= len(frame) * 0.8, f"{col} mostly empty"
 
 
@@ -146,7 +152,7 @@ def test_schema_is_exactly_identity_ranked_scores():
     """run() returns identity + all 41 ranked factors + scores, and nothing else."""
     ranked = [c for g, cols in vqmg.COLUMN_GROUPS.items() if g != "identity" for c in cols]
     assert vqmg.columns() == vqmg.IDENTITY + ranked + vqmg.SCORE_COLUMNS
-    assert len(vqmg.columns()) == 9 + 40 + 21 == 70
+    assert len(vqmg.columns()) == 9 + 38 + 21 == 68
 
 
 def test_business_momentum_is_five_factors_no_guidance():
@@ -168,7 +174,9 @@ def test_unranked_diagnostics_are_dropped_by_default_and_kept_with_full():
     df = engine.rank_universe(pd.DataFrame(rows))
     lean = vqmg._order(df)
     wide = vqmg._order(df, full=True)
-    for col in ("roic_tc", "cash_engine_yield", "downside_rating", "normalized_pe", "vol_1y"):
+    for col in ("roic_tc", "cash_engine_yield", "downside_rating", "normalized_pe",
+                "vol_1y", "expected_return", "rerating_gap", "ev_to_gp", "max_downside",
+                "peak_margin_risk", "ocf_yield", "fwd_basis", "ntm_coverage"):
         assert col not in lean.columns
         assert col in wide.columns
 
@@ -218,7 +226,7 @@ def test_unknown_weight_key_is_rejected():
 def test_ranked_counts_per_sub_factor(frame):
     """G 7 | B 5 | M 5 | R 10 | Q 5 | V 8 = 40."""
     assert {k: len(v) for k, v in vqmg.RANKED.items()} == {
-        "G": 7, "B": 5, "M": 5, "R": 10, "Q": 5, "V": 8}
+        "G": 7, "B": 5, "M": 5, "R": 10, "Q": 5, "V": 6}
 
 
 def test_bounds_are_respected(frame):
@@ -245,3 +253,146 @@ def test_metrics_accepts_a_prefetched_blob():
     m = vqmg.metrics("T00", blob=_blob("T00", 0))
     assert m["symbol"] == "T00"
     assert math.isfinite(m["rev_cagr_3y"])
+
+
+# ---------------------------------------------------------------------------
+# Value model — the six ranked variables and the NTM interpolation
+# ---------------------------------------------------------------------------
+
+def _est_blob(sym, fy_end_offset_days, eps_pair=(10.0, 12.0), rev_pair=(1e10, 1.2e10)):
+    """A blob whose only interesting feature is where its fiscal year ends."""
+    b = _blob(sym, 7)
+    today = dt.date.today()
+    d0 = today + dt.timedelta(days=fy_end_offset_days)
+    d1 = d0 + dt.timedelta(days=365)
+    b["estimates"] = [
+        {"date": d0.isoformat(), "estimatedEpsAvg": eps_pair[0], "estimatedRevenueAvg": rev_pair[0]},
+        {"date": d1.isoformat(), "estimatedEpsAvg": eps_pair[1], "estimatedRevenueAvg": rev_pair[1]},
+    ]
+    return b
+
+
+def test_value_is_six_equal_weighted_variables():
+    assert vqmg.RANKED["V"] == ["ebit_to_ev", "fwd_earn_yield", "fcf_yield",
+                                "book_to_price", "sales_to_ev", "normalized_ep"]
+    for v in vqmg.RANKED["V"]:
+        assert engine.FACTOR_SPEC[v] == ("V", +1), f"{v} must be higher-is-cheaper"
+
+
+def test_owners_return_pipeline_is_no_longer_ranked():
+    for col in ("expected_return", "rerating_gap", "terminal_yield", "midcycle_yield",
+                "peak_margin_risk", "ev_to_gp", "ev_gp_growth_adj", "max_downside"):
+        assert col not in engine.FACTOR_SPEC, f"{col} should be context-only now"
+
+
+def test_ntm_blend_weights_by_overlap_with_the_next_twelve_months():
+    """FY ending in 17 days -> ~5% of it, ~95% of the following year."""
+    m = engine.compute_metrics("X", _est_blob("X", 17), bench=None)
+    assert m["fwd_basis"] == "ntm"
+    expected = (17 / 365) * 10.0 + (348 / 365) * 12.0
+    assert abs(m["fwd_eps_ntm"] - expected) < 0.02
+    assert 11.8 < m["fwd_eps_ntm"] < 12.0, "should sit close to the far year"
+
+
+def test_ntm_blend_for_a_december_year_end_is_between_the_two():
+    days = (dt.date(dt.date.today().year, 12, 31) - dt.date.today()).days
+    m = engine.compute_metrics("X", _est_blob("X", days), bench=None)
+    lo, hi = 10.0, 12.0
+    assert lo < m["fwd_eps_ntm"] < hi
+    assert abs(m["ntm_coverage"] - 1.0) < 0.01
+
+
+def test_a_just_ended_fiscal_year_no_longer_counts_as_forward():
+    """FY that ended 41 days ago contributes nothing; the blend is the next FY."""
+    m = engine.compute_metrics("X", _est_blob("X", -41), bench=None)
+    assert m["fwd_basis"] == "ntm"
+    assert abs(m["fwd_eps_ntm"] - 12.0) < 1e-6, "must not carry the closed year"
+
+
+def test_thin_coverage_falls_back_and_records_it():
+    b = _blob("X", 7)
+    today = dt.date.today()
+    # a single row for a year ending 700 days out overlaps the next 12 months
+    # by only ~30 days, so the blend cannot be trusted
+    b["estimates"] = [{"date": (today + dt.timedelta(days=700)).isoformat(),
+                       "estimatedEpsAvg": 9.0, "estimatedRevenueAvg": 5e10}]
+    m = engine.compute_metrics("X", b, bench=None)
+    assert m["ntm_coverage"] < engine.NTM_MIN_COVERAGE
+    assert m["fwd_basis"] == "fy"
+
+
+def test_forecast_loss_blanks_the_forward_yield_rather_than_modelling_it():
+    b = _est_blob("LOSS", 200, eps_pair=(-2.0, -1.5))
+    m = engine.compute_metrics("LOSS", b, bench=None)
+    assert m["fwd_earn_yield_calc"] == 2
+    assert math.isnan(m["fwd_earn_yield"]), "a forecast loss must not be back-filled"
+
+
+def test_consensus_path_is_flagged_zero():
+    m = engine.compute_metrics("X", _est_blob("X", 200), bench=None)
+    assert m["fwd_earn_yield_calc"] == 0
+    assert m["fwd_earn_yield"] > 0
+
+
+def test_modelled_fallback_fires_only_when_there_is_no_consensus():
+    b = _blob("X", 7)
+    b["estimates"] = []
+    m = engine.compute_metrics("X", b, bench=None)
+    assert m["fwd_earn_yield_calc"] == 1
+
+
+def test_financials_blank_the_two_variables_that_have_no_meaning():
+    b = _blob("BANK", 3)
+    b["profile"][0]["sector"] = "Financial Services"
+    m = engine.compute_metrics("BANK", b, bench=None)
+    assert math.isnan(m["fcf_yield"]) and math.isnan(m["sales_to_ev"])
+    assert math.isfinite(m["ebit_to_ev"]), "financials use net income / mktcap"
+    assert math.isfinite(m["book_to_price"])
+
+
+def test_context_pipeline_still_reads_the_wc_stripped_yields():
+    """Splitting plain from stripped must not have changed the downside stack."""
+    m = engine.compute_metrics("T00", _blob("T00", 0), bench=None)
+    assert math.isfinite(m["fcf_yield_core"]) and math.isfinite(m["ocf_yield_core"])
+    assert math.isfinite(m["downside_rating"])
+
+
+def test_a_missing_eps_leg_does_not_deny_revenue_its_blend():
+    """Coverage differs by field on FMP; the fallback must be per field."""
+    b = _blob("X", 7)
+    today = dt.date.today()
+    d0 = today + dt.timedelta(days=60)
+    d1 = d0 + dt.timedelta(days=365)
+    b["estimates"] = [
+        {"date": d0.isoformat(), "estimatedEpsAvg": None, "estimatedRevenueAvg": 1e10},
+        {"date": d1.isoformat(), "estimatedEpsAvg": 12.0, "estimatedRevenueAvg": 1.2e10},
+    ]
+    m = engine.compute_metrics("X", b, bench=None)
+    assert m["fwd_rev_basis"] == "ntm", "revenue blended fine and must say so"
+    assert m["fwd_basis"] == "fy", "EPS could not blend and must fall back"
+    assert math.isfinite(m["fwd_rev_ntm"])
+    assert math.isfinite(m["fwd_eps_ntm"]), "EPS must still get the fiscal-year rule"
+
+
+def test_a_zero_estimate_is_missing_data_not_a_break_even_forecast():
+    """FMP writes 0 for 'no estimate'. Reading it literally made an uncovered
+    name look like a forecast of exactly zero, which then tripped the
+    forecast-loss test and blanked the variable for the wrong reason."""
+    b = _blob("NOCOV", 5)
+    today = dt.date.today()
+    b["estimates"] = [
+        {"date": (today + dt.timedelta(days=60)).isoformat(),
+         "estimatedEpsAvg": 0, "estimatedRevenueAvg": 0},
+        {"date": (today + dt.timedelta(days=425)).isoformat(),
+         "estimatedEpsAvg": 0, "estimatedRevenueAvg": 0},
+    ]
+    m = engine.compute_metrics("NOCOV", b, bench=None)
+    assert m["fwd_earn_yield_calc"] == 1, "no coverage must use the modelled fallback"
+    assert m["fwd_earn_yield_calc"] != 2, "zero is not a forecast loss"
+    assert not math.isfinite(m["fwd_eps_ntm"])
+
+
+def test_a_genuine_negative_forecast_still_blanks():
+    m = engine.compute_metrics("LOSS2", _est_blob("LOSS2", 60, eps_pair=(-3.0, -1.0)), bench=None)
+    assert m["fwd_earn_yield_calc"] == 2
+    assert math.isnan(m["fwd_earn_yield"])

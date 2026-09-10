@@ -28,6 +28,15 @@ import pandas as pd
 
 TODAY = dt.date.today()
 
+# Minimum share of the next twelve months the estimate rows must span before
+# the NTM blend is trusted; below this the old fiscal-year rule is used.
+NTM_MIN_COVERAGE = 0.80
+
+# Sectors allowed to project their full delivered growth rate in the modelled
+# forward-yield fallback; everything else is capped (see VALUE_G_CAP).
+STEADY_GROWTH_SECTORS = ("Technology", "Communication Services")
+VALUE_G_CAP = 0.20
+
 SUBS = ["G", "B", "M", "R", "Q", "V"]
 SUPERS = {   # super factor <- {sub factor: blend weight}
     "GRW": {"G": 1.0},
@@ -118,20 +127,89 @@ def compute_metrics(ticker, blob, bench=None):
     m["rev_yoy_ttm"] = safe(lambda: rev_ttm / rev_ttm_1y - 1)
     m["rev_accel"] = safe(lambda: m["rev_yoy_ttm"] - m["rev_cagr_3y"])
     m["gp_growth_ttm"] = safe(lambda: gp_ttm / gp_ttm_1y - 1)
-    # forward growth: NEAREST future fiscal year (FMP returns newest-first;
-    # sort ascending or the loop grabs the farthest-out FY)
-    fwd_rev = np.nan
-    fwd_eps = np.nan
+    # ---- forward estimates, interpolated to a common NTM window ------------
+    # FMP publishes estimates per FISCAL year. Taking "the next FY that has not
+    # closed" makes the forecast horizon depend on each company's accounting
+    # calendar, so a June year-end gets a ten-month-ahead number while a
+    # nearly-finished FY gets a trailing number wearing a forward label. Each
+    # row is instead treated as covering the twelve months ENDING on its date,
+    # weighted by how much of that period falls inside the next twelve months,
+    # and the overlapping fiscal years are blended. Every company is then
+    # measured over the same window.
     dated = []
     for e in est:
         d = safe(lambda: dt.date.fromisoformat(e["date"][:10]), None)
         if d:
             dated.append((d, e))
-    for d, e in sorted(dated, key=lambda x: x[0]):
-        if d >= TODAY - dt.timedelta(days=45):
-            fwd_rev = e.get("estimatedRevenueAvg") or np.nan
-            fwd_eps = e.get("estimatedEpsAvg") or np.nan
-            break
+    dated.sort(key=lambda x: x[0])
+
+    def _est_value(row, field):
+        """Read one estimate figure, or None if it is not really there.
+
+        FMP publishes 0 in an analyst-estimate row to mean "no estimate", not a
+        consensus of exactly zero. Taking that literally makes a name with no
+        coverage look like a forecast of break-even, which then trips the
+        forecast-loss test and blanks the variable for the wrong reason.
+        """
+        v = row.get(field)
+        if v is None:
+            return None
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(v) or v == 0.0:
+            return None
+        return v
+
+    _w0, _w1 = TODAY, TODAY + dt.timedelta(days=365)
+    _wts = []                       # (date, raw overlap fraction, row)
+    for d, e in dated:
+        ov = (min(d, _w1) - max(d - dt.timedelta(days=365), _w0)).days
+        if ov > 0:
+            _wts.append((d, ov / 365.0, e))
+    ntm_cov = float(sum(w for _, w, _ in _wts))
+    m["ntm_coverage"] = ntm_cov
+
+    def _blend(field):
+        """Coverage-normalized blend of the overlapping fiscal years, or NaN."""
+        if ntm_cov < NTM_MIN_COVERAGE or not _wts:
+            return np.nan
+        tot, used = 0.0, 0.0
+        for _, w, e in _wts:
+            v = _est_value(e, field)
+            if v is None:
+                return np.nan       # a missing leg would silently reweight the blend
+            tot += w * v
+            used += w
+        return tot / used if used > 0 else np.nan
+
+    def _fy_rule(field):
+        """The old rule: nearest fiscal year that has not closed AND carries this
+        figure. Rows missing the field are skipped rather than ending the search,
+        since revenue and EPS coverage differ row by row on FMP."""
+        for d, e in dated:
+            if d >= TODAY - dt.timedelta(days=45):
+                v = _est_value(e, field)
+                if v is not None:
+                    return v
+        return np.nan
+
+    # Fall back PER FIELD. A row missing one leg must not deny the other field
+    # its fallback: revenue and EPS coverage differ by name on FMP.
+    fwd_rev = _blend("estimatedRevenueAvg")
+    fwd_eps = _blend("estimatedEpsAvg")
+    m["fwd_basis"] = "ntm" if math.isfinite(fwd_eps) else "fy"
+    m["fwd_rev_basis"] = "ntm" if math.isfinite(fwd_rev) else "fy"
+    if not math.isfinite(fwd_eps):
+        fwd_eps = _fy_rule("estimatedEpsAvg")
+    if not math.isfinite(fwd_rev):
+        fwd_rev = _fy_rule("estimatedRevenueAvg")
+    m["ntm_blend"] = (" + ".join(f"{w / ntm_cov:.0%} {d.isoformat()}" for d, w, _ in _wts)
+                      if (m["fwd_basis"] == "ntm" or m["fwd_rev_basis"] == "ntm") else "")
+    fwd_eps_ntm, fwd_rev_ntm = fwd_eps, fwd_rev
+    m["fwd_rev_ntm"] = fwd_rev_ntm
+    m["fwd_eps_ntm"] = fwd_eps_ntm
     m["fwd_rev_growth"] = safe(lambda: fwd_rev / rev_ttm - 1)
     m["fwd_eps_growth"] = safe(lambda: fwd_eps / eps_ttm - 1
                                if fwd_eps and eps_ttm and fwd_eps > 0 and eps_ttm > 0 else np.nan)
@@ -147,6 +225,15 @@ def compute_metrics(ticker, blob, bench=None):
                     hits += 1
         return hits / tot if tot else np.nan
     m["growth_persistence"] = safe(persistence)
+    def _qtrs_grew_8():
+        n = 0
+        for i in range(min(8, max(0, len(inc_q) - 4))):
+            a, b = inc_q[i].get("revenue"), inc_q[i + 4].get("revenue")
+            if a and b and b > 0 and a > b:
+                n += 1
+        return n
+    qtrs_grew_8 = _qtrs_grew_8()
+    m["qtrs_grew_8"] = qtrs_grew_8
 
     # ============ B: BUSINESS MOMENTUM (the recent numbers) ============
     def q_yoy(i, field="revenue"):
@@ -495,10 +582,95 @@ def compute_metrics(ticker, blob, bench=None):
         if cand > 0.15 * abs(cfo_ttm):
             _wc_strip = cand
     m["wc_strip_applied"] = _wc_strip
-    m["ocf_yield_reported"] = safe(lambda: cfo_ttm / m["mktcap"] if (not is_fin and m["mktcap"]) else np.nan)
-    m["fcf_yield_reported"] = safe(lambda: fcf_ttm / m["mktcap"] if (not is_fin and m["mktcap"]) else np.nan)
-    m["ocf_yield"] = safe(lambda: (cfo_ttm - _wc_strip) / m["mktcap"] if (not is_fin and m["mktcap"]) else np.nan)
-    m["fcf_yield"] = safe(lambda: (fcf_ttm - _wc_strip) / m["mktcap"] if (not is_fin and m["mktcap"]) else np.nan)
+    # PLAIN yields, as reported. fcf_yield is the RANKED Value variable.
+    m["ocf_yield"] = safe(lambda: cfo_ttm / m["mktcap"] if (not is_fin and m["mktcap"]) else np.nan)
+    m["fcf_yield"] = safe(lambda: fcf_ttm / m["mktcap"] if (not is_fin and m["mktcap"]) else np.nan)
+    # WC-STRIPPED yields, unchanged, feeding the context-only owner's-return
+    # pipeline and the downside stack below.
+    m["ocf_yield_core"] = safe(lambda: (cfo_ttm - _wc_strip) / m["mktcap"] if (not is_fin and m["mktcap"]) else np.nan)
+    m["fcf_yield_core"] = safe(lambda: (fcf_ttm - _wc_strip) / m["mktcap"] if (not is_fin and m["mktcap"]) else np.nan)
+
+    # ------------------------------------------------------------------
+    # THE SIX RANKED VALUE VARIABLES
+    # Every one is a yield or a ratio to market value, so HIGHER ALWAYS MEANS
+    # CHEAPER and all six carry the same sign. Equal-weighted within V.
+    # A financial has no meaningful enterprise value and no comparable sales
+    # line, so FCF yield and Sales/EV are blank for them; coverage shrinkage
+    # scores the name on four and pulls it toward the universe average.
+    # ------------------------------------------------------------------
+    ebit_ttm = ttm(inc_q, "operatingIncome")
+    book0 = safe(lambda: bal_a[0]["totalStockholdersEquity"])
+
+    # 1. EBIT / EV      financials: TTM net income / market cap
+    if is_fin:
+        m["ebit_to_ev"] = safe(lambda: ni_ttm / m["mktcap"] if m["mktcap"] else np.nan)
+    else:
+        m["ebit_to_ev"] = safe(lambda: ebit_ttm / ev if (ev and ev > 0) else np.nan)
+
+    # growth rate used ONLY by the modelled fallback in variable 2: delivered
+    # TTM revenue growth, floored at zero. Erratic growers are capped; a steady
+    # grower (5+ of the last 8 quarters) or a technology / communication
+    # services name projects at its full delivered rate.
+    def _fallback_g():
+        gd = m.get("rev_yoy_ttm", np.nan)
+        if not math.isfinite(gd):
+            return np.nan
+        gd = max(0.0, float(gd))
+        steady = (m["sector"] in STEADY_GROWTH_SECTORS) or (qtrs_grew_8 >= 5)
+        return gd if steady else min(gd, VALUE_G_CAP)
+    _g_fb = safe(_fallback_g)
+
+    # 2. Forward earnings yield.  fwd_earn_yield_calc records which path was
+    #    taken: 0 consensus, 1 modelled fallback, 2 blank because consensus
+    #    forecasts a loss. A forecast loss is a real answer, not a gap, so the
+    #    variable is left blank rather than back-filled with the profitability
+    #    the company used to have.
+    m["fwd_earn_yield_calc"] = np.nan
+    def fwd_earn_yield():
+        px_ = m.get("price", np.nan)
+        if math.isfinite(fwd_eps_ntm) and math.isfinite(px_) and px_ > 0:
+            if fwd_eps_ntm <= 0:
+                m["fwd_earn_yield_calc"] = 2
+                return np.nan
+            m["fwd_earn_yield_calc"] = 0
+            return fwd_eps_ntm / px_
+        m["fwd_earn_yield_calc"] = 1
+        mc = m.get("mktcap", np.nan)
+        if not (math.isfinite(_g_fb) and mc and mc > 0):
+            return np.nan
+        if is_fin:
+            roe5 = m.get("roic_5y", np.nan)
+            if not (math.isfinite(roe5) and book0 and book0 > 0):
+                return np.nan
+            return roe5 * book0 * (1 + _g_fb) / mc
+        nm5 = _margin5("netIncome")
+        if not (math.isfinite(nm5) and math.isfinite(rev_ttm)):
+            return np.nan
+        return rev_ttm * (1 + _g_fb) * nm5 / mc
+    m["fwd_earn_yield"] = safe(fwd_earn_yield)
+
+    # 3. FCF yield — plain TTM (OCF - capex) / market cap, set above. Blank for
+    #    financials. (No working-capital strip: that belongs to the context
+    #    pipeline, which reads fcf_yield_core.)
+
+    # 4. Book / Price — the primary balance-sheet metric, kept for financials.
+    m["book_to_price"] = safe(lambda: book0 / m["mktcap"] if (book0 and m["mktcap"]) else np.nan)
+
+    # 5. Sales / EV
+    m["sales_to_ev"] = safe(lambda: rev_ttm / ev if (not is_fin and ev and ev > 0) else np.nan)
+
+    # 6. Normalized E/P — 5y average margin on the TTM revenue base.
+    #    Financials: 5y average ROE on book.
+    def normalized_ep():
+        mc = m.get("mktcap", np.nan)
+        if not (mc and mc > 0):
+            return np.nan
+        if is_fin:
+            roe5 = m.get("roic_5y", np.nan)
+            return roe5 * book0 / mc if (math.isfinite(roe5) and book0 and book0 > 0) else np.nan
+        nm5 = _margin5("netIncome")
+        return nm5 * rev_ttm / mc if (math.isfinite(nm5) and math.isfinite(rev_ttm)) else np.nan
+    m["normalized_ep"] = safe(normalized_ep)
     # investor-choice cash yield: what the business generates, credited back for
     # investment made at high returns. Negative FCF at high ROIC is a choice,
     # not a deficiency (the Amazon case): use OCF yield when ROIC clears 15%
@@ -516,8 +688,8 @@ def compute_metrics(ticker, blob, bench=None):
         # yields are already CORE (material WC release removed at source)
         rg_, ri = cap_return_gate(), m.get("reinvest_intensity", np.nan)
         if math.isfinite(rg_) and rg_ > m["cap_bar"] and math.isfinite(ri) and ri > 0.05:
-            return m["ocf_yield"]
-        return m["fcf_yield"]
+            return m["ocf_yield_core"]
+        return m["fcf_yield_core"]
     m["cash_engine_yield"] = safe(choice_yield)
     g = m["fwd_rev_growth"] if math.isfinite(m.get("fwd_rev_growth", np.nan)) else m.get("rev_yoy_ttm", np.nan)
     m["ev_gp_growth_adj"] = safe(lambda: m["ev_to_gp"] / (1 + max(g, -0.5)) if math.isfinite(g) else np.nan)
@@ -611,7 +783,7 @@ def compute_metrics(ticker, blob, bench=None):
         not_degrowing = math.isfinite(cg) and cg >= -0.02
         models = []   # (downside estimate <= 0, strength weight)
         # FCF vs treasury (w3): the strongest floor — real buyers arrive there
-        fy = m.get("fcf_yield", np.nan)
+        fy = m.get("fcf_yield_core", np.nan)
         if not_degrowing and math.isfinite(fy) and fy > 0:
             models.append((min(0.0, fy / RF - 1), 3.0))
         # gross CF vs treasury — THE KEY INDICATOR: a going concern whose
@@ -619,7 +791,7 @@ def compute_metrics(ticker, blob, bench=None):
         # downside then requires the earnings themselves to collapse. Weight 4
         # when the engine gate proves capex discretionary, 3 otherwise (capex
         # uncertainty is one notch of doubt, not a disqualification).
-        oy = m.get("ocf_yield", np.nan)
+        oy = m.get("ocf_yield_core", np.nan)
         rg_ = np.nan
         try:
             rg_ = cap_return_gate()
@@ -744,14 +916,18 @@ FACTOR_SPEC = {
     "dist_from_high":      ("M", +1),
     "rel_strength":        ("M", +1),
     "down_resilience":     ("M", +1),
-    "ev_to_gp":            ("V", -1),
-    "expected_return":     ("V", +1),
-    "rerating_gap":        ("V", +1),
-    "ocf_yield":           ("V", +1),
+    # VALUE — six equal-weighted variables, every one a yield or a ratio to
+    # market value, so higher always means cheaper and all six share a sign.
+    # The owner's-return pipeline (mid-cycle yield, believed growth, re-rating
+    # gap, terminal yield, peak-margin risk, EV/gross profit) and the six-model
+    # downside stack are still computed, but as CONTEXT: they drive the flags
+    # and the D1-D5 downside rating, not the Value quintile.
+    "ebit_to_ev":          ("V", +1),
+    "fwd_earn_yield":      ("V", +1),
     "fcf_yield":           ("V", +1),
-    "peak_margin_risk":    ("V", -1),
-    "max_downside":        ("V", +1),
-    "ev_gp_growth_adj":    ("V", -1),
+    "book_to_price":       ("V", +1),
+    "sales_to_ev":         ("V", +1),
+    "normalized_ep":       ("V", +1),
 }
 
 
@@ -770,6 +946,9 @@ BOUNDS = {
     "sbc_to_rev": (0.0, 0.6), "wc_flatter": (0.0, 0.25), "dso_change_days": (-90.0, 90.0), "dpo_change_days": (-90.0, 90.0), "mom_12_1": (-0.95, 5.0), "trend_smoothness": (-2.5, 2.5),
     "dist_from_high": (-0.95, 0.0), "rel_strength": (-2.0, 3.0), "down_resilience": (-0.05, 0.05),
     "ev_to_gp": (0.3, 150.0), "ocf_yield": (-0.5, 0.6), "fcf_yield": (-0.5, 0.6),
+    "ocf_yield_core": (-0.5, 0.6), "fcf_yield_core": (-0.5, 0.6),
+    "ebit_to_ev": (-0.5, 0.75), "fwd_earn_yield": (-0.5, 0.75),
+    "book_to_price": (0.0, 10.0), "sales_to_ev": (0.0, 25.0), "normalized_ep": (-0.5, 1.0),
     "cash_engine_yield": (-0.5, 0.6), "midcycle_yield": (-0.5, 0.6),
     "expected_return": (-0.6, 0.9), "ev_gp_growth_adj": (0.2, 150.0),
     "peak_margin_risk": (0.0, 0.6), "max_downside": (-0.8, 0.0), "price_vs_200d": (-0.8, 3.0), "worst_month_5y": (-0.8, 0.0), "dist_to_52w_low": (-0.9, 0.0), "vol_1y": (0.05, 2.0), "distributed_yield": (-0.05, 0.20), "div_yield": (0.0, 0.15), "buyback_yield": (-0.10, 0.20), "normalized_pe": (1.0, 300.0), "normalized_fcf_yield": (-0.4, 0.5), "above_trend_capex": (-0.3, 0.3), "cash_to_mktcap": (0.0, 1.5),
